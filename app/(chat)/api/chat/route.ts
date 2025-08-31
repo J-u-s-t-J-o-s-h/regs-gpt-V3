@@ -218,10 +218,15 @@ export async function POST(request: Request) {
     } else {
       return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
     }
+  
   } catch (error) {
     if (error instanceof ChatSDKError) {
       return error.toResponse();
     }
+
+    // This is the corrected part
+    console.error('An unexpected error occurred:', error);
+    return new ChatSDKError('bad_request:api').toResponse();
   }
 }
 
