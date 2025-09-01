@@ -42,7 +42,9 @@ export const maxDuration = 60;
 
 // This helper function is part of the original boilerplate and is kept for potential future use.
 let globalStreamContext: ResumableStreamContext | null = null;
-export function getStreamContext() {
+
+// The 'export' keyword has been removed from this function to fix the build error.
+function getStreamContext() {
   if (!globalStreamContext) {
     try {
       globalStreamContext = createResumableStreamContext({
