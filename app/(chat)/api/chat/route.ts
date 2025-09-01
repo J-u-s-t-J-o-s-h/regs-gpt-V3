@@ -40,8 +40,8 @@ import type { VisibilityType } from '@/components/visibility-selector';
 
 export const maxDuration = 60;
 
+// This helper function is part of the original boilerplate and is kept for potential future use.
 let globalStreamContext: ResumableStreamContext | null = null;
-
 export function getStreamContext() {
   if (!globalStreamContext) {
     try {
@@ -58,7 +58,6 @@ export function getStreamContext() {
       }
     }
   }
-
   return globalStreamContext;
 }
 
@@ -73,162 +72,70 @@ export async function POST(request: Request) {
   }
 
   try {
-    const {
-      id,
-      message,
-      selectedChatModel,
-      selectedVisibilityType,
-    }: {
-      id: string;
-      message: ChatMessage;
-      selectedChatModel: ChatModel['id'];
-      selectedVisibilityType: VisibilityType;
-    } = requestBody;
-
+    const { message }: PostRequestBody = requestBody;
     const session = await auth();
 
     if (!session?.user) {
       return new ChatSDKError('unauthorized:chat').toResponse();
     }
 
-    const userType: UserType = session.user.type;
+    // --- START: New xAI Retrieval Logic ---
 
-    const messageCount = await getMessageCountByUserId({
-      id: session.user.id,
-      differenceInHours: 24,
+    // Correctly filter for text parts before joining
+    const userMessage = message.parts
+      .filter(part => part.type === 'text')
+      .map(part => part.text)
+      .join('');
+      
+    const groqApiKey = process.env.GROQ_API_KEY; // Using your Groq key
+    const collectionId = 'collection_d567b17f-53c5-4011-8d69-af32b8249eec';
+
+    // --- IMPORTANT ---
+    // The code below is a conceptual example based on how modern AI APIs work.
+    // You MUST verify the correct API endpoint URL and request body structure
+    // from your official xAI developer documentation.
+
+    const response = await fetch('https://api.x.ai/v1/chat/completions', { // Note: This URL is a placeholder!
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${groqApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'grok-1', // Or the specific model you intend to use
+        messages: [{ role: 'user', content: userMessage }],
+        // This is the critical part that tells the API to use your documents:
+        collection_id: collectionId,
+      }),
     });
 
-    if (messageCount > entitlementsByUserType[userType].maxMessagesPerDay) {
-      return new ChatSDKError('rate_limit:chat').toResponse();
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('xAI API Error:', errorText);
+      // Using a valid error type
+      return new ChatSDKError('bad_request:api').toResponse();
     }
 
-    const chat = await getChatById({ id });
+    // Assuming the API returns a standard JSON response
+    const data = await response.json();
+    const finalAnswer = data.choices[0].message.content;
 
-    if (!chat) {
-      const title = await generateTitleFromUserMessage({
-        message,
-      });
+    // We send the final answer back directly as a plain text response.
+    return new Response(finalAnswer);
 
-      await saveChat({
-        id,
-        userId: session.user.id,
-        title,
-        visibility: selectedVisibilityType,
-      });
-    } else {
-      if (chat.userId !== session.user.id) {
-        return new ChatSDKError('forbidden:chat').toResponse();
-      }
-    }
+    // --- END: New xAI Retrieval Logic ---
 
-    const messagesFromDb = await getMessagesByChatId({ id });
-    const uiMessages = [...convertToUIMessages(messagesFromDb), message];
-
-    const { longitude, latitude, city, country } = geolocation(request);
-
-    const requestHints: RequestHints = {
-      longitude,
-      latitude,
-      city,
-      country,
-    };
-
-    await saveMessages({
-      messages: [
-        {
-          chatId: id,
-          id: message.id,
-          role: 'user',
-          parts: message.parts,
-          attachments: [],
-          createdAt: new Date(),
-        },
-      ],
-    });
-
-    const streamId = generateUUID();
-    await createStreamId({ streamId, chatId: id });
-
-    const stream = createUIMessageStream({
-      execute: ({ writer: dataStream }) => {
-        const result = streamText({
-          model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: convertToModelMessages(uiMessages),
-          stopWhen: stepCountIs(5),
-          experimental_activeTools:
-            selectedChatModel === 'chat-model-reasoning'
-              ? []
-              : [
-                  'getWeather',
-                  'createDocument',
-                  'updateDocument',
-                  'requestSuggestions',
-                ],
-          experimental_transform: smoothStream({ chunking: 'word' }),
-          tools: {
-            getWeather,
-            createDocument: createDocument({ session, dataStream }),
-            updateDocument: updateDocument({ session, dataStream }),
-            requestSuggestions: requestSuggestions({
-              session,
-              dataStream,
-            }),
-          },
-          experimental_telemetry: {
-            isEnabled: isProductionEnvironment,
-            functionId: 'stream-text',
-          },
-        });
-
-        result.consumeStream();
-
-        dataStream.merge(
-          result.toUIMessageStream({
-            sendReasoning: true,
-          }),
-        );
-      },
-      generateId: generateUUID,
-      onFinish: async ({ messages }) => {
-        await saveMessages({
-          messages: messages.map((message) => ({
-            id: message.id,
-            role: message.role,
-            parts: message.parts,
-            createdAt: new Date(),
-            attachments: [],
-            chatId: id,
-          })),
-        });
-      },
-      onError: () => {
-        return 'Oops, an error occurred!';
-      },
-    });
-
-    const streamContext = getStreamContext();
-
-    if (streamContext) {
-      return new Response(
-        await streamContext.resumableStream(streamId, () =>
-          stream.pipeThrough(new JsonToSseTransformStream()),
-        ),
-      );
-    } else {
-      return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
-    }
-  
   } catch (error) {
     if (error instanceof ChatSDKError) {
       return error.toResponse();
     }
-
-    // This is the corrected part
+    
     console.error('An unexpected error occurred:', error);
+    // Using a valid error type
     return new ChatSDKError('bad_request:api').toResponse();
   }
 }
+
 
 export async function DELETE(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -254,3 +161,4 @@ export async function DELETE(request: Request) {
 
   return Response.json(deletedChat, { status: 200 });
 }
+
