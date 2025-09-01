@@ -1,67 +1,14 @@
+import { auth } from '@/app/(auth)/auth';
 import {
-  convertToModelMessages,
-  createUIMessageStream,
-  JsonToSseTransformStream,
-  smoothStream,
-  stepCountIs,
-  streamText,
-} from 'ai';
-import { auth, type UserType } from '@/app/(auth)/auth';
-import { type RequestHints, systemPrompt } from '@/lib/ai/prompts';
-import {
-  createStreamId,
   deleteChatById,
   getChatById,
-  getMessageCountByUserId,
-  getMessagesByChatId,
-  saveChat,
-  saveMessages,
 } from '@/lib/db/queries';
-import { convertToUIMessages, generateUUID } from '@/lib/utils';
-import { generateTitleFromUserMessage } from '../../actions';
-import { createDocument } from '@/lib/ai/tools/create-document';
-import { updateDocument } from '@/lib/ai/tools/update-document';
-import { requestSuggestions } from '@/lib/ai/tools/request-suggestions';
-import { getWeather } from '@/lib/ai/tools/get-weather';
-import { isProductionEnvironment } from '@/lib/constants';
-import { myProvider } from '@/lib/ai/providers';
-import { entitlementsByUserType } from '@/lib/ai/entitlements';
-import { postRequestBodySchema, type PostRequestBody } from './schema';
-import { geolocation } from '@vercel/functions';
-import {
-  createResumableStreamContext,
-  type ResumableStreamContext,
-} from 'resumable-stream';
-import { after } from 'next/server';
 import { ChatSDKError } from '@/lib/errors';
-import type { ChatMessage } from '@/lib/types';
-import type { ChatModel } from '@/lib/ai/models';
-import type { VisibilityType } from '@/components/visibility-selector';
+import { postRequestBodySchema, type PostRequestBody } from './schema';
+import { createUIMessageStream, JsonToSseTransformStream } from 'ai';
+import { generateUUID } from '@/lib/utils';
 
 export const maxDuration = 60;
-
-// This helper function is part of the original boilerplate and is kept for potential future use.
-let globalStreamContext: ResumableStreamContext | null = null;
-
-// The 'export' keyword has been removed from this function to fix the build error.
-function getStreamContext() {
-  if (!globalStreamContext) {
-    try {
-      globalStreamContext = createResumableStreamContext({
-        waitUntil: after,
-      });
-    } catch (error: any) {
-      if (error.message.includes('REDIS_URL')) {
-        console.log(
-          ' > Resumable streams are disabled due to missing REDIS_URL',
-        );
-      } else {
-        console.error(error);
-      }
-    }
-  }
-  return globalStreamContext;
-}
 
 export async function POST(request: Request) {
   let requestBody: PostRequestBody;
@@ -81,7 +28,7 @@ export async function POST(request: Request) {
       return new ChatSDKError('unauthorized:chat').toResponse();
     }
 
-    // --- START: New xAI Retrieval Logic ---
+    // --- START: Updated xAI Retrieval Logic ---
 
     // Correctly filter for text parts before joining
     const userMessage = message.parts
@@ -89,24 +36,22 @@ export async function POST(request: Request) {
       .map(part => part.text)
       .join('');
       
-    const groqApiKey = process.env.GROQ_API_KEY; // Using your Groq key
+    const xaiApiKey = process.env.XAI_API_KEY; 
     const collectionId = 'collection_d567b17f-53c5-4011-8d69-af32b8249eec';
 
     // --- IMPORTANT ---
-    // The code below is a conceptual example based on how modern AI APIs work.
-    // You MUST verify the correct API endpoint URL and request body structure
-    // from your official xAI developer documentation.
+    // You must verify the correct API endpoint URL from your official xAI developer documentation.
+    // The one below is a placeholder and may need to be changed.
 
     const response = await fetch('https://api.x.ai/v1/chat/completions', { // Note: This URL is a placeholder!
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${groqApiKey}`,
+        'Authorization': `Bearer ${xaiApiKey}`,
       },
       body: JSON.stringify({
-        model: 'grok-1', // Or the specific model you intend to use
+        model: 'grok-4-0709', 
         messages: [{ role: 'user', content: userMessage }],
-        // This is the critical part that tells the API to use your documents:
         collection_id: collectionId,
       }),
     });
@@ -114,18 +59,33 @@ export async function POST(request: Request) {
     if (!response.ok) {
       const errorText = await response.text();
       console.error('xAI API Error:', errorText);
-      // Using a valid error type
       return new ChatSDKError('bad_request:api').toResponse();
     }
 
-    // Assuming the API returns a standard JSON response
     const data = await response.json();
     const finalAnswer = data.choices[0].message.content;
 
-    // We send the final answer back directly as a plain text response.
-    return new Response(finalAnswer);
+    // --- START: REVISED RESPONSE LOGIC ---
+    // This block now simulates a word-by-word stream to match the UI's expectations.
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        const words = finalAnswer.split(' ');
+        for (const word of words) {
+          writer.write({
+            type: 'text-delta',
+            id: generateUUID(),
+            delta: word + ' ',
+          });
+          // Small delay to make it feel like a real stream for the UI
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      },
+      generateId: generateUUID,
+    });
 
-    // --- END: New xAI Retrieval Logic ---
+    // Use the boilerplate's original method to send the stream.
+    return new Response(stream.pipeThrough(new JsonToSseTransformStream()));
+    // --- END: REVISED RESPONSE LOGIC ---
 
   } catch (error) {
     if (error instanceof ChatSDKError) {
@@ -133,7 +93,6 @@ export async function POST(request: Request) {
     }
     
     console.error('An unexpected error occurred:', error);
-    // Using a valid error type
     return new ChatSDKError('bad_request:api').toResponse();
   }
 }
@@ -155,7 +114,7 @@ export async function DELETE(request: Request) {
 
   const chat = await getChatById({ id });
 
-  if (chat.userId !== session.user.id) {
+  if (!chat || chat.userId !== session.user.id) {
     return new ChatSDKError('forbidden:chat').toResponse();
   }
 
